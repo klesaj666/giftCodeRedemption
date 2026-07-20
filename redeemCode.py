@@ -1,5 +1,6 @@
 import sys
 import time
+import random
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
@@ -17,12 +18,11 @@ SHEET_ID = "1GyVt_zaCZkL5R3q3veDWkahDgObumdLClu8l2hxMBuk"
 GID = "0"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# Number of parallel Chrome instances running concurrently
-# 4 is optimal for GitHub Actions free runners (2 CPU cores)
-MAX_WORKERS = 4 
+# Reduced from 4 to 2 to prevent rate-limiting/Server Busy errors
+MAX_WORKERS = 2 
 
 def setup_headless_driver():
-    """Initializes Chrome in headless mode for cloud environments."""
+    """Initializes Chrome in headless mode."""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -38,6 +38,9 @@ def redeem_code_for_player(player_id, gift_code):
     Spawns an isolated browser session to handle a single player ID.
     Returns a tuple: (status_code, in_game_name)
     """
+    # Stagger thread starts slightly so workers don't hit the site at the exact same millisecond
+    time.sleep(random.uniform(0.2, 0.8))
+
     driver = setup_headless_driver()
     target_url = "https://ks-giftcode.centurygame.com/"
     max_retries = 3
@@ -77,7 +80,8 @@ def redeem_code_for_player(player_id, gift_code):
                         if "server busy" in msg_text:
                             driver.find_element(By.CSS_SELECTOR, ".message_modal .confirm_btn").click()
                             current_retry += 1
-                            time.sleep(2)
+                            # Increasing wait on retry (2s, 4s, 6s) to let server cool down
+                            time.sleep(2 * current_retry + random.uniform(0.5, 1.5))
                             continue
                         else:
                             print(f"[ID: {player_id}] Login failed: '{popup_msg.text}'")
@@ -129,7 +133,8 @@ def redeem_code_for_player(player_id, gift_code):
 
                 if "server busy" in msg_text:
                     current_retry += 1
-                    time.sleep(2)
+                    # Increasing wait on retry
+                    time.sleep(2 * current_retry + random.uniform(0.5, 1.5))
                     continue
                 else:
                     # Print formatted result with extracted in-game name
@@ -138,7 +143,7 @@ def redeem_code_for_player(player_id, gift_code):
 
             except Exception as e:
                 current_retry += 1
-                time.sleep(2)
+                time.sleep(2 * current_retry)
 
         print(f"[Player: {in_game_name} | ID: {player_id}] Failed after {max_retries} retries due to Server Busy.")
         return ("FAILED_BUSY", in_game_name)
