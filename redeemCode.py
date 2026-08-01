@@ -1,136 +1,90 @@
 import sys
 import time
+import requests
 import pandas as pd
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+# Force stdout to flush line-by-line instantly in GitHub Actions logs
+sys.stdout.reconfigure(line_buffering=True)
+
+# Google Sheet Details
 SHEET_ID = "1GyVt_zaCZkL5R3q3veDWkahDgObumdLClu8l2hxMBuk"
 GID = "0"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-def setup_driver():
-    options = uc.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    
-    # Bypasses bot detection flags
-    driver = uc.Chrome(options=options)
-    return driver
+# Direct Century Game API Endpoints
+LOGIN_URL = "https://ks-giftcode.centurygame.com/api/player"
+REDEEM_URL = "https://ks-giftcode.centurygame.com/api/gift_code"
 
-def redeem_code_for_player(driver, player_id, gift_code):
-    target_url = "https://ks-giftcode.centurygame.com/"
-    max_retries = 3
-    current_retry = 0
+# Standard Headers to emulate a browser request
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Origin": "https://ks-giftcode.centurygame.com",
+    "Referer": "https://ks-giftcode.centurygame.com/"
+}
+
+def process_player_redemption(session, player_id, gift_code):
+    """
+    Directly queries Century Game backend APIs for login and gift code redemption.
+    Returns (status_code, player_name, server_response_message).
+    """
+    # Step 1: Login / Fetch Player Info
+    login_payload = {"fid": str(player_id)}
     in_game_name = "Unknown"
-
-    while current_retry < max_retries:
-        try:
-            driver.get(target_url)
-
-            # Step 1: Enter Player ID
-            player_id_field = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Player ID']"))
-            )
-            player_id_field.clear()
-            player_id_field.send_keys(str(player_id))
-
-            login_button = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, ".login_btn"))
-            )
-            login_button.click()
+    
+    try:
+        login_res = session.post(LOGIN_URL, data=login_payload, headers=HEADERS, timeout=10)
+        login_data = login_res.json()
+        
+        # Check login status
+        if login_data.get("code") == 0 and "data" in login_data:
+            in_game_name = login_data["data"].get("nickname", "Logged In")
+        elif "server busy" in str(login_data.get("msg", "")).lower():
+            return ("FAILED_BUSY", in_game_name, "Server Busy at Login")
+        else:
+            msg = login_data.get("msg", "Player not found")
+            return ("FAILED_LOGIN", in_game_name, msg)
             
-            # Step 2: Wait for Login Response
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.any_of(
-                        EC.visibility_of_element_located((By.CSS_SELECTOR, ".roleInfo p.name")),
-                        EC.visibility_of_element_located((By.CSS_SELECTOR, "p.msg"))
-                    )
-                )
+    except Exception as e:
+        return ("ERROR", in_game_name, f"Network error during login: {e}")
 
-                try:
-                    popup_msg = driver.find_element(By.CSS_SELECTOR, "p.msg")
-                    msg_text = popup_msg.text.lower()
-                    if "server busy" in msg_text:
-                        driver.find_element(By.CSS_SELECTOR, ".message_modal .confirm_btn").click()
-                        current_retry += 1
-                        time.sleep(3)
-                        continue
-                    else:
-                        print(f"[ID: {player_id}] Login failed: '{popup_msg.text}'")
-                        return ("FAILED_UNEXPECTED_POPUP", in_game_name)
-                except NoSuchElementException:
-                    # Extract In-Game Name
-                    try:
-                        name_element = driver.find_element(By.CSS_SELECTOR, ".roleInfo p.name")
-                        if name_element.text.strip():
-                            in_game_name = name_element.text.strip()
-                    except Exception:
-                        in_game_name = "Logged In"
+    # Step 2: Submit Gift Code Redemption
+    redeem_payload = {
+        "fid": str(player_id),
+        "cdk": gift_code
+    }
+    
+    try:
+        time.sleep(0.5) # Brief pause between login and redeem API calls
+        redeem_res = session.post(REDEEM_URL, data=redeem_payload, headers=HEADERS, timeout=10)
+        redeem_data = redeem_res.json()
+        
+        response_msg = redeem_data.get("msg", "Unknown response from server")
+        
+        if redeem_data.get("code") == 0:
+            return ("SUCCESS", in_game_name, response_msg)
+        elif "server busy" in response_msg.lower():
+            return ("FAILED_BUSY", in_game_name, "Server Busy at Redemption")
+        else:
+            # Captures 'Gift has already been claimed!', 'Code expired', etc.
+            return ("SUCCESS_LOGGED", in_game_name, response_msg)
 
-            except TimeoutException:
-                print(f"[ID: {player_id}] Login timed out.")
-                return ("FAILED_LOGIN", in_game_name)
+    except Exception as e:
+        return ("ERROR", in_game_name, f"Network error during redemption: {e}")
 
-            # Step 3: Enter Gift Code
-            gift_code_field = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Enter Gift Code']"))
-            )
-            gift_code_field.clear()
-            gift_code_field.send_keys(gift_code)
-
-            # Step 4: Click Confirm
-            confirm_xpath = "//*[contains(translate(text(), 'CONFIRM', 'confirm'), 'confirm') or contains(@class, 'confirm')]"
-            confirm_button = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.XPATH, confirm_xpath))
-            )
-            
-            try:
-                confirm_button.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", confirm_button)
-
-            # Step 5: Handle Result
-            popup_msg = WebDriverWait(driver, 15).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, "p.msg"))
-            )
-            msg_text = popup_msg.text.lower()
-            response_text = popup_msg.text
-
-            try:
-                confirm_btn = driver.find_element(By.CSS_SELECTOR, ".message_modal .confirm_btn")
-                confirm_btn.click()
-            except Exception:
-                pass
-
-            if "server busy" in msg_text:
-                current_retry += 1
-                time.sleep(3)
-                continue
-            else:
-                print(f"[Player: {in_game_name} | ID: {player_id}] Result: '{response_text}'")
-                return ("SUCCESS", in_game_name)
-
-        except Exception as e:
-            current_retry += 1
-            time.sleep(2)
-
-    print(f"[Player: {in_game_name} | ID: {player_id}] Failed after {max_retries} retries due to Server Busy.")
-    return ("FAILED_BUSY", in_game_name)
 
 def main():
     if len(sys.argv) < 2:
         print("Error: No gift code provided.")
         sys.exit(1)
         
-    gift_code = sys.argv[1]
-    print(f"Starting redemption batch for Gift Code: {gift_code}")
+    gift_code = sys.argv[1].strip()
+    print(f"Starting API redemption batch for Gift Code: {gift_code}")
 
+    # Step 1: Fetch Google Sheet Data
     try:
+        print("Fetching player list from Google Sheet...")
         df = pd.read_csv(SHEET_CSV_URL)
         player_ids = df.iloc[:, 0].dropna().astype(str).tolist() 
         print(f"Loaded {len(player_ids)} player IDs.")
@@ -138,22 +92,37 @@ def main():
         print(f"Failed to read Google Sheet: {e}")
         return
 
-    driver = setup_driver()
-    successful_redemptions = 0
+    # Step 2: Process All Players via Persistent HTTP Session
+    session = requests.Session()
+    successful_count = 0
     failed_players = []
 
-    try:
-        for p_id in player_ids:
-            status, name = redeem_code_for_player(driver, p_id.strip(), gift_code)
-            if status == "SUCCESS":
-                successful_redemptions += 1
-            else:
-                failed_players.append(f"{name} ({p_id})")
-            time.sleep(1)
-    finally:
-        driver.quit()
+    start_time = time.time()
 
-    print(f"\nCompleted! Successful: {successful_redemptions} | Failed: {len(failed_players)}")
+    for p_id in player_ids:
+        clean_id = p_id.strip()
+        status, player_name, result_msg = process_player_redemption(session, clean_id, gift_code)
+        
+        if status in ["SUCCESS", "SUCCESS_LOGGED"]:
+            successful_count += 1
+            print(f"[Player: {player_name} | ID: {clean_id}] Result: '{result_msg}'")
+        else:
+            failed_players.append(f"{player_name} ({clean_id}) - {result_msg}")
+            print(f"[Player: {player_name} | ID: {clean_id}] Failed: '{result_msg}'")
+            
+        # Short pause between HTTP requests to stay under rate limits
+        time.sleep(0.8)
+
+    duration = time.time() - start_time
+
+    print("\n--------------------------")
+    print("    REDEMPTION SUMMARY    ")
+    print("--------------------------")
+    print(f"Total Players Processed: {len(player_ids)}")
+    print(f"Successful Operations: {successful_count}")
+    print(f"Failed/Skipped: {len(failed_players)}")
+    print(f"Total Elapsed Time: {duration:.2f} seconds")
+    print("--------------------------")
 
 if __name__ == "__main__":
     main()
