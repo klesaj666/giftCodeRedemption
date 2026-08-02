@@ -10,32 +10,33 @@ SHEET_ID = "1GyVt_zaCZkL5R3q3veDWkahDgObumdLClu8l2hxMBuk"
 GID = "0"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# Century Game Constants
+# Century Game API Configuration
 DEFAULT_KINGDOM = "113"
 SECRET_SALT = "tB87#kPtkxqOS2"
-# Working API Endpoint (Bypasses Akamai blocks on ks-giftcode)
-REDEEM_API_URL = "https://kingshot-giftcode.centurygame.com/api/gift_code"
+# Official Gift Code API endpoint
+REDEEM_API_URL = "https://ks-giftcode.centurygame.com/api/gift_code"
 
-# Streamlit Page UI
+# Streamlit Page UI Configuration
 st.set_page_config(page_title="KingShot Auto-Redeemer", page_icon="🎁")
 st.title("🎁 KingShot Gift Code Redeemer")
 st.write("Redeem gift codes across all Player IDs in your shared Google Sheet.")
 
+# Single User Input
 gift_code = st.text_input("Enter Gift Code:", placeholder="e.g. KS0803").strip()
 
-def generate_signature(params):
+def calculate_sign(params_dict):
     """
-    Sorts payload keys alphabetically, creates a query string,
-    appends secret salt, and generates the MD5 signature hash.
+    Sorts keys alphabetically, builds query string 'key=val&key2=val2',
+    appends secret salt, and returns the MD5 hash signature.
     """
-    sorted_keys = sorted(params.keys())
-    query_string = "&".join([f"{k}={params[k]}" for k in sorted_keys])
+    sorted_keys = sorted(params_dict.keys())
+    query_string = "&".join([f"{k}={params_dict[k]}" for k in sorted_keys])
     to_hash = query_string + SECRET_SALT
     return hashlib.md5(to_hash.encode("utf-8")).hexdigest()
 
 def redeem_for_player(player_id, code, kingdom_id=DEFAULT_KINGDOM):
     """
-    Sends signed redemption payload directly to Century Game backend API.
+    Sends signed POST payload directly to Century Game backend API.
     """
     session = requests.Session()
     headers = {
@@ -45,22 +46,30 @@ def redeem_for_player(player_id, code, kingdom_id=DEFAULT_KINGDOM):
         "Referer": "https://ks-giftcode.centurygame.com/"
     }
 
-    # Time must be Unix timestamp in SECONDS
-    current_time = str(int(time.time()))
+    # Time MUST be in Milliseconds for Century Game API
+    current_time_ms = str(int(time.time() * 1000))
     
-    params = {
+    # 1. Prepare Base Payload
+    payload = {
         "cdk": str(code),
         "fid": str(player_id),
         "kid": str(kingdom_id),
-        "time": current_time
+        "time": current_time_ms
     }
-    params["sign"] = generate_signature(params)
+    
+    # 2. Calculate Signature and append to payload
+    payload["sign"] = calculate_sign(payload)
 
     try:
-        res = session.post(REDEEM_API_URL, data=params, headers=headers, timeout=12)
-        data = res.json()
+        res = session.post(REDEEM_API_URL, data=payload, headers=headers, timeout=12)
         
-        msg = data.get("msg", "Unknown response from server")
+        # Check if response returned valid JSON
+        try:
+            data = res.json()
+        except Exception:
+            return "ERROR", "Server returned non-JSON response (WAF Block)"
+
+        msg = data.get("msg", "Unknown response")
         code_val = data.get("code")
 
         if code_val == 0:
@@ -108,11 +117,10 @@ if st.button("🚀 Start Redemption Process", type="primary"):
                 failed_count += 1
                 logs.append(f"❌ [ID: {clean_id} | Kingdom: {DEFAULT_KINGDOM}] Failed: '{msg}'")
 
-            # Update live UI console
+            # Live UI Update
             progress_bar.progress((index + 1) / total_players)
             log_box.code("\n".join(logs[-15:]), language="text")
             
-            # Short pause between API calls to prevent rate limiting
             time.sleep(0.3)
 
         st.balloons()
