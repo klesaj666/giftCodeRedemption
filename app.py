@@ -5,55 +5,48 @@ import requests
 import pandas as pd
 import streamlit as st
 
-# Configuration
+# Google Sheet Details
 SHEET_ID = "1GyVt_zaCZkL5R3q3veDWkahDgObumdLClu8l2hxMBuk"
 GID = "0"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# Default Kingdom and ZenRows API Key
+# Century Game Constants
 DEFAULT_KINGDOM = "113"
-DEFAULT_ZENROWS_KEY = "3e252db2ff3782d8d5d0f585f85a2dbda6e7b4db"
-
 SECRET_SALT = "tB87#kPtkxqOS2"
-REDEEM_URL = "https://kingshot-giftcode.centurygame.com/api/gift_code"
+# Working API Endpoint (Bypasses Akamai blocks on ks-giftcode)
+REDEEM_API_URL = "https://kingshot-giftcode.centurygame.com/api/gift_code"
 
-# Streamlit UI Configuration
+# Streamlit Page UI
 st.set_page_config(page_title="KingShot Auto-Redeemer", page_icon="🎁")
 st.title("🎁 KingShot Gift Code Redeemer")
 st.write("Redeem gift codes across all Player IDs in your shared Google Sheet.")
 
-# Single User Input: Gift Code
 gift_code = st.text_input("Enter Gift Code:", placeholder="e.g. KS0803").strip()
 
 def generate_signature(params):
     """
     Sorts payload keys alphabetically, creates a query string,
-    appends secret salt, and returns the required MD5 signature.
+    appends secret salt, and generates the MD5 signature hash.
     """
     sorted_keys = sorted(params.keys())
     query_string = "&".join([f"{k}={params[k]}" for k in sorted_keys])
     to_hash = query_string + SECRET_SALT
     return hashlib.md5(to_hash.encode("utf-8")).hexdigest()
 
-def make_request(target_url, payload, api_key):
-    """Routes the POST request through ZenRows residential proxy."""
-    if api_key:
-        proxy_url = f"https://api.zenrows.com/v1/?key={api_key}&url={target_url}"
-        res = requests.post(proxy_url, data=payload, timeout=20)
-    else:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://ks-giftcode.centurygame.com",
-            "Referer": "https://ks-giftcode.centurygame.com/"
-        }
-        res = requests.post(target_url, data=payload, headers=headers, timeout=15)
-    
-    return res.json()
+def redeem_for_player(player_id, code, kingdom_id=DEFAULT_KINGDOM):
+    """
+    Sends signed redemption payload directly to Century Game backend API.
+    """
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://ks-giftcode.centurygame.com",
+        "Referer": "https://ks-giftcode.centurygame.com/"
+    }
 
-def redeem_for_player(player_id, code, kingdom_id=DEFAULT_KINGDOM, api_key=DEFAULT_ZENROWS_KEY):
-    """Sends signed redemption payload directly to Century Game backend."""
-    current_time = str(int(time.time())) # Time must be in seconds
+    # Time must be Unix timestamp in SECONDS
+    current_time = str(int(time.time()))
     
     params = {
         "cdk": str(code),
@@ -64,21 +57,25 @@ def redeem_for_player(player_id, code, kingdom_id=DEFAULT_KINGDOM, api_key=DEFAU
     params["sign"] = generate_signature(params)
 
     try:
-        data = make_request(REDEEM_URL, params, api_key)
-        msg = data.get("msg", "No message returned")
+        res = session.post(REDEEM_API_URL, data=params, headers=headers, timeout=12)
+        data = res.json()
         
-        if data.get("code") == 0:
+        msg = data.get("msg", "Unknown response from server")
+        code_val = data.get("code")
+
+        if code_val == 0:
             return "SUCCESS", msg
-        elif "already been claimed" in msg.lower():
-            return "SUCCESS_LOGGED", msg
+        elif "already" in msg.lower() or "claimed" in msg.lower():
+            return "ALREADY_CLAIMED", msg
         elif "server busy" in msg.lower():
             return "FAILED_BUSY", "Server Busy"
         else:
             return "FAILED", msg
-    except Exception as e:
-        return "ERROR", f"Connection error: {e}"
 
-# Start Button Trigger
+    except Exception as e:
+        return "ERROR", f"Network error: {e}"
+
+# Start Execution Button
 if st.button("🚀 Start Redemption Process", type="primary"):
     if not gift_code:
         st.error("Please enter a Gift Code first.")
@@ -104,7 +101,7 @@ if st.button("🚀 Start Redemption Process", type="primary"):
             clean_id = p_id.strip()
             status, msg = redeem_for_player(clean_id, gift_code)
             
-            if status in ["SUCCESS", "SUCCESS_LOGGED"]:
+            if status in ["SUCCESS", "ALREADY_CLAIMED"]:
                 success_count += 1
                 logs.append(f"✅ [ID: {clean_id} | Kingdom: {DEFAULT_KINGDOM}] Result: '{msg}'")
             else:
@@ -114,7 +111,9 @@ if st.button("🚀 Start Redemption Process", type="primary"):
             # Update live UI console
             progress_bar.progress((index + 1) / total_players)
             log_box.code("\n".join(logs[-15:]), language="text")
-            time.sleep(0.4)
+            
+            # Short pause between API calls to prevent rate limiting
+            time.sleep(0.3)
 
         st.balloons()
         st.success(f"Finished! Successfully Handled: {success_count} | Failed/Skipped: {failed_count}")
