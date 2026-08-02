@@ -33,4 +33,4 @@ jobs:
 
       - name: Execute Script
         run: |
-          python redeemCode.py "${{ github.event.inputs.gift_code }}"
+          python -u redeemCode.py "${{ github.event.inputs.gift_code }}"
