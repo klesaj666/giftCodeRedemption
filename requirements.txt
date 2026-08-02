@@ -1,2 +1,3 @@
-selenium
+streamlit
+requests
 pandas
